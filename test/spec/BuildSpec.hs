@@ -190,3 +190,11 @@ spec = do
           output <- runGarn ["build", "project"]
           readFile "result/build-artifact" `shouldReturn` "hello from setup\n"
           exitCode output `shouldBe` ExitSuccess
+
+      it "builds packages in a git repository with untracked files" $ \runGarn -> do
+        cmd "git init --initial-branch=main" :: IO ()
+        writeHaskellProject repoDir
+        _ <- runGarn ["build", "foo"]
+        doesDirectoryExist "result" `shouldReturn` True
+        StdoutTrim output <- cmd ("result/bin/garn-test" :: String)
+        output `shouldBe` ("haskell test output" :: String)
