@@ -5,7 +5,7 @@ module TestUtils where
 
 import Control.Concurrent
 import Control.Concurrent.Async (waitEitherCatch, withAsync)
-import Control.Exception (SomeException, bracket, catch, throwIO)
+import Control.Exception (SomeException, bracket, catch, finally, throwIO)
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
 import Data.Maybe (fromMaybe)
@@ -18,11 +18,11 @@ import Garn.Env
 import System.Environment (withArgs)
 import System.Exit
 import System.FilePath ((</>))
-import System.IO (Handle, hClose, hPutStr, hPutStrLn)
+import System.IO (Handle, hClose, hGetContents, hPutStr, hPutStrLn)
 import qualified System.IO as Sys
 import System.IO.Silently (hCapture)
 import System.Posix (fdToHandle, openPseudoTerminal)
-import System.Process (ProcessHandle, interruptProcessGroupOf, waitForProcess)
+import System.Process (ProcessHandle, createPipe, interruptProcessGroupOf, waitForProcess)
 import Test.Hspec
 import Text.Regex.PCRE.Heavy (compileM, (=~))
 
@@ -112,7 +112,13 @@ runGarn = runGarnInDir "."
 runGarnInDir :: (HasCallStack) => FilePath -> [String] -> String -> FilePath -> Maybe FilePath -> IO ProcResult
 runGarnInDir tempDir args stdin repoDir shell = do
   userShell <- maybe (fromStdoutTrim <$> cmd ("which bash" :: String)) pure shell
-  (stderr, (stdout, exitCode)) <- hCapture [Sys.stderr] $
+  (stderrReadEnd, stderrWriteEnd) <- createPipe
+  waitForStderr <- do
+    mvar <- newEmptyMVar
+    _ <- forkIO $ do
+      hGetContents stderrReadEnd >>= putMVar mvar
+    return $ readMVar mvar
+  (stdout, exitCode) <-
     hCapture [Sys.stdout] $ do
       withStdinTty stdin $ \stdin -> do
         withArgs args $ do
@@ -120,13 +126,15 @@ runGarnInDir tempDir args stdin repoDir shell = do
                 Env
                   { workingDir = tempDir,
                     stdin,
+                    stderr = stderrWriteEnd,
                     userShell,
                     initFileName = repoDir <> "/ts/internal/init.ts"
                   }
           let go = do
-                run env
+                run env `finally` hClose stderrWriteEnd
                 return ExitSuccess
           go `catch` \(e :: ExitCode) -> pure e
+  stderr <- waitForStderr
   return $
     ProcResult
       { stdout,
@@ -179,7 +187,7 @@ onTestFailureLogger test = do
                    "=======",
                    "stdout: \n" <> stdout x,
                    "=======",
-                   "stderr: \n" <> stderr x,
+                   "stderr: \n" <> TestUtils.stderr x,
                    "======="
                  ]
   test log
